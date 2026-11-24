@@ -1,7 +1,9 @@
 # Interprete Vocale
 
-Un'app web che traduce in tempo reale una conversazione tra due persone che parlano lingue diverse.
-Ognuno sente la traduzione **con la voce dell'altro**: la voce di chi parla viene clonata da un breve campione.
+Un'app web, utilizzabile anche su iPhone, che traduce in tempo reale con **la voce di chi parla**, clonata da un breve campione. Ha due modalità:
+
+- **📞 Chiamata tradotta**: chiami un numero di telefono normale. Chi risponde sente la tua voce nella sua lingua, e tu senti la sua risposta tradotta nella tua. L'altra persona non deve installare niente.
+- **Conversazione dal vivo**: due persone nella stessa stanza, con un solo telefono tra di loro.
 
 ## Come funziona
 
@@ -31,13 +33,46 @@ npm start
 
 Apri http://localhost:3000 in Chrome, Edge o Safari.
 
+## Chiamate tradotte
+
+### Come funziona
+
+```
+Tu (iPhone) ⇄ questo server ⇄ Twilio ⇄ rete telefonica ⇄ telefono dell'altra persona
+```
+
+1. Nell'app scrivi il numero, con il prefisso internazionale, scegli la lingua di chi risponderà e premi **Chiama**.
+2. Quando l'altra persona risponde, sente prima un breve **avviso automatico** nella sua lingua: la chiamata è tradotta da un'IA con una voce sintetica.
+3. Tu parli nella tua lingua. Ogni frase viene trascritta, tradotta e pronunciata sulla linea **con la tua voce clonata**.
+4. L'altra persona risponde. La sua frase viene tradotta e la senti sull'iPhone nella tua lingua, mentre sullo schermo compaiono il testo originale e la traduzione.
+
+Ogni frase arriva dopo circa 1,5–3 secondi. Funziona meglio parlando con frasi brevi e facendo una piccola pausa alla fine di ciascuna.
+
+### Cosa serve
+
+1. **Un account Twilio** (https://www.twilio.com) con un numero di telefono abilitato alle chiamate internazionali verso i paesi che ti servono.
+   - Con l'account di prova puoi chiamare solo numeri verificati, e chi risponde sente un messaggio di Twilio. Per l'uso reale serve un account a pagamento.
+   - Se vuoi che chi risponde veda **il tuo numero di cellulare**, verificalo su Twilio ("Verified Caller IDs") e mettilo in `TWILIO_PHONE_NUMBER`.
+2. **Un server sempre acceso con HTTPS e WebSocket**, raggiungibile da Twilio, ad esempio Render, Railway o Fly.io. Vercel **non** va bene per le chiamate, perché non supporta WebSocket. Va bene solo per la modalità conversazione.
+3. Le variabili d'ambiente in `.env.example`: le chiavi Anthropic ed ElevenLabs, poi `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `PUBLIC_URL` (l'indirizzo https del server) e `CALL_ACCESS_CODE`.
+4. **La tua voce clonata.** Nella scheda **Persona A** imposta il tuo nome e la tua lingua, poi registra la voce. Se non la cloni, chi risponde sente una voce standard.
+
+### Sicurezza e costi
+
+- Ogni chiamata costa: il minuto Twilio, più trascrizione, traduzione e sintesi vocale. Il **codice di accesso** (`CALL_ACCESS_CODE`) impedisce a chi trova l'indirizzo dell'app di chiamare a tue spese. Scegline uno lungo.
+- Le chiamate durano al massimo `CALL_MAX_MINUTES` minuti (predefinito: 30).
+- Il server accetta solo notifiche firmate da Twilio e flussi audio con un codice valido per quella chiamata.
+
+### Note legali
+
+In Europa chi riceve la chiamata va informato che la voce è sintetica e generata dall'IA (AI Act, GDPR). Per questo l'avviso iniziale è sempre attivo. Clona solo la tua voce, o quella di chi ti ha dato il consenso.
+
 ## Su iPhone
 
 Su iPhone Safari dà accesso al microfono solo se l'app è aperta da un indirizzo **https://**. Hai due strade.
 
-**1. Pubblicarla online (consigliato).** L'app è pronta per Vercel o per un qualsiasi hosting Node con HTTPS (Render, Railway, Fly.io…).
-Su Vercel: importa il repository, imposta le variabili `ANTHROPIC_API_KEY` ed `ELEVENLABS_API_KEY` e pubblica.
-Il server non tiene stato in memoria, quindi funziona anche su hosting serverless.
+**1. Pubblicarla online (consigliato).** Usa un hosting Node con HTTPS e WebSocket, come Render, Railway o Fly.io: comando di avvio `npm start`, più le variabili d'ambiente di `.env.example`.
+Su Vercel funziona solo la modalità conversazione, senza chiamate.
 
 **2. Provarla dal PC con un tunnel HTTPS.** Avvia `npm start`, poi esegui ad esempio
 `cloudflared tunnel --url http://localhost:3000` e apri sull'iPhone l'indirizzo `https://…trycloudflare.com` che compare.
@@ -78,7 +113,9 @@ Poi, sull'iPhone:
 ## Struttura
 
 ```
-server.js          API: /api/turn (trascrivi, traduci, prepara l'audio), /api/voices (clonazione), /api/tts/:id (audio in streaming)
+server.js          API: /api/turn (conversazione), /api/voices (clonazione), /api/tts/:token (audio in streaming)
+call.js            Chiamate tradotte: Twilio, flusso audio della linea, traduzione nei due sensi
+lib.js             Trascrizione, traduzione (Claude) e sintesi vocale (ElevenLabs) condivise
 public/index.html  Interfaccia
 public/app.js      Microfono, rilevamento della voce, coda di riproduzione
 public/style.css   Stile (chiaro/scuro, adatto al telefono)

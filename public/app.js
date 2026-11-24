@@ -350,33 +350,15 @@ function stopPTT(id, btn) {
   if (secs > 0.4) sendSegment(chunks, id);
 }
 
-// ---------------- Mani libere (VAD) ----------------
-const vad = { on: false, fn: null };
-$("#auto").onclick = async () => {
-  const btn = $("#auto");
-  if (vad.on) {
-    chunkListeners.delete(vad.fn);
-    vad.on = false;
-    btn.classList.remove("on");
-    btn.textContent = "▶︎ Avvia modalità mani libere";
-    $("#level").style.width = "0";
-    releaseAwake();
-    return setStatus("Ascolto interrotto.");
-  }
-  primeAudio();
-  try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
-  vad.on = true;
-  keepAwake();
-  btn.classList.add("on");
-  btn.textContent = "■ Ferma ascolto";
-  setStatus(`In ascolto: parlate a turno in ${LANGS[speakers.a.lang]} o ${LANGS[speakers.b.lang]}.`);
-
+// ---------------- Rilevamento della voce (VAD) ----------------
+// Restituisce un ascoltatore di blocchi audio che chiama onSegment(blocchi)
+// ogni volta che una frase finisce (pausa di 0,7 s).
+function createVad(onSegment) {
   const chunkMs = (2048 / sampleRate) * 1000;
   const PRE_ROLL = Math.ceil(300 / chunkMs);
   const END_SILENCE_MS = 700, MIN_SPEECH_MS = 300, MAX_SEGMENT_MS = 12000;
   let floor = 0.005, inSpeech = false, seg = [], pre = [], speechMs = 0, silenceMs = 0;
-
-  vad.fn = (c) => {
+  return (c) => {
     const level = rms(c);
     $("#level").style.width = Math.min(100, level * 900) + "%";
     const muted = !headphones() && (playing || Date.now() < suppressUntil);
@@ -392,12 +374,159 @@ $("#auto").onclick = async () => {
     seg.push(c);
     if (level > thr) { speechMs += chunkMs; silenceMs = 0; } else silenceMs += chunkMs;
     if (silenceMs >= END_SILENCE_MS || seg.length * chunkMs >= MAX_SEGMENT_MS) {
-      if (speechMs >= MIN_SPEECH_MS) sendSegment(seg, null);
+      if (speechMs >= MIN_SPEECH_MS) onSegment(seg);
       inSpeech = false; seg = [];
     }
   };
+}
+
+// ---------------- Mani libere ----------------
+const vad = { on: false, fn: null };
+function stopHandsFree() {
+  if (!vad.on) return;
+  chunkListeners.delete(vad.fn);
+  vad.on = false;
+  const btn = $("#auto");
+  btn.classList.remove("on");
+  btn.textContent = "▶︎ Avvia modalità mani libere";
+  $("#level").style.width = "0";
+  releaseAwake();
+}
+$("#auto").onclick = async () => {
+  if (vad.on) { stopHandsFree(); return setStatus("Ascolto interrotto."); }
+  primeAudio();
+  try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
+  if (call.active) return setStatus("Termina prima la chiamata in corso.", true);
+  vad.on = true;
+  keepAwake();
+  const btn = $("#auto");
+  btn.classList.add("on");
+  btn.textContent = "■ Ferma ascolto";
+  setStatus(`In ascolto: parlate a turno in ${LANGS[speakers.a.lang]} o ${LANGS[speakers.b.lang]}.`);
+  vad.fn = createVad((seg) => sendSegment(seg, null));
   chunkListeners.add(vad.fn);
 };
+
+// ---------------- Chiamata telefonica tradotta ----------------
+const call = { active: false, ws: null, fn: null, timer: null, startedAt: 0, answered: false };
+const calleeSel = $("#calleeLang");
+for (const [code, label] of Object.entries(LANGS)) calleeSel.add(new Option(label, code));
+calleeSel.value = store.get("calleeLang", "en");
+calleeSel.onchange = () => store.set("calleeLang", calleeSel.value);
+$("#callTo").value = store.get("callTo", "");
+$("#callCode").value = store.get("callCode", "");
+
+fetch("/api/call/config").then((r) => r.json()).then((c) => {
+  if (!c.enabled) {
+    $("#callPanel").classList.add("disabled");
+    setCallStatus("Chiamate non attive: il server deve essere configurato con Twilio (vedi README).", true);
+  }
+}).catch(() => {});
+
+function setCallStatus(text, isError) {
+  const s = $("#callStatus");
+  s.textContent = text;
+  s.classList.toggle("error", Boolean(isError));
+}
+
+function normalizeNumber(v) {
+  let n = v.replace(/[\s().\-\/]/g, "");
+  if (n.startsWith("00")) n = "+" + n.slice(2);
+  return n;
+}
+
+$("#callBtn").onclick = async () => {
+  if (call.active) return hangUp();
+  primeAudio();
+  const to = normalizeNumber($("#callTo").value);
+  if (!/^\+[1-9]\d{6,14}$/.test(to)) return setCallStatus("Scrivi il numero con il prefisso internazionale, es. +44 20 7946 0958.", true);
+  const code = $("#callCode").value.trim();
+  if (!code) return setCallStatus("Inserisci il codice di accesso.", true);
+  store.set("callTo", $("#callTo").value);
+  store.set("callCode", code);
+  try { await ensureMic(); } catch (e) { return setCallStatus("Microfono non disponibile: " + e.message, true); }
+  stopHandsFree();
+
+  call.active = true;
+  call.answered = false;
+  keepAwake();
+  $("#callBtn").classList.add("live");
+  $("#callBtn").textContent = "Riaggancia";
+  setCallStatus("Avvio della chiamata…");
+
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/call`);
+  ws.binaryType = "arraybuffer";
+  call.ws = ws;
+  ws.onopen = () => ws.send(JSON.stringify({ type: "start", to, code, calleeLang: calleeSel.value, me: speakers.a }));
+  ws.onmessage = (e) => {
+    if (typeof e.data !== "string") {
+      // Traduzione di ciò che ha detto l'altra persona: la riproduciamo in ordine.
+      const url = URL.createObjectURL(new Blob([e.data], { type: "audio/mpeg" }));
+      playChain = playChain.then(() => play(url)).finally(() => URL.revokeObjectURL(url));
+      return;
+    }
+    const msg = JSON.parse(e.data);
+    if (msg.type === "status") onCallStatus(msg.status);
+    else if (msg.type === "line") addCallLine(msg);
+    else if (msg.type === "error") setCallStatus(msg.message, true);
+  };
+  ws.onclose = () => endCallUi();
+  ws.onerror = () => setCallStatus("Connessione al server interrotta.", true);
+};
+
+function onCallStatus(status) {
+  const labels = {
+    initiated: "Chiamata in corso…", queued: "Chiamata in corso…", ringing: "Sta squillando…",
+    busy: "Il numero è occupato.", "no-answer": "Nessuna risposta.", failed: "Chiamata non riuscita.",
+    canceled: "Chiamata annullata.", ended: "Chiamata terminata.", completed: "Chiamata terminata.",
+  };
+  if (status === "in-progress" || status === "answered") {
+    if (call.answered) return;
+    call.answered = true;
+    call.startedAt = Date.now();
+    // Da qui in poi ogni tua frase viene inviata e tradotta.
+    call.fn = createVad((seg) => call.ws?.readyState === 1 && call.ws.send(toWav(seg)));
+    chunkListeners.add(call.fn);
+    const tick = () => {
+      const s = Math.floor((Date.now() - call.startedAt) / 1000);
+      setCallStatus(`In chiamata · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} · parla normalmente, facendo brevi pause`);
+    };
+    tick();
+    call.timer = setInterval(tick, 1000);
+    return;
+  }
+  if (labels[status]) setCallStatus(labels[status], ["busy", "no-answer", "failed"].includes(status));
+}
+
+function hangUp() {
+  if (call.ws?.readyState === 1) call.ws.send(JSON.stringify({ type: "hangup" }));
+  else endCallUi();
+}
+
+function endCallUi() {
+  if (!call.active) return;
+  call.active = false;
+  if (call.fn) chunkListeners.delete(call.fn);
+  call.fn = null;
+  clearInterval(call.timer);
+  call.ws = null;
+  releaseAwake();
+  $("#level").style.width = "0";
+  $("#callBtn").classList.remove("live");
+  $("#callBtn").textContent = "📞 Chiama";
+  if (call.answered && !$("#callStatus").classList.contains("error")) setCallStatus("Chiamata terminata.");
+}
+
+function addCallLine({ who, original, translation }) {
+  const el = document.createElement("div");
+  el.className = `msg ${who === "me" ? "a" : who === "them" ? "b" : "system"}`;
+  el.innerHTML = `<div class="who"></div><div class="orig"></div><div class="tr"></div>`;
+  $(".who", el).textContent =
+    who === "me" ? `${speakers.a.name} (tu)` : who === "them" ? "Interlocutore" : "Avviso automatico a chi risponde";
+  $(".orig", el).textContent = original;
+  $(".tr", el).textContent = translation;
+  $("#callLog").prepend(el);
+}
 
 // ---------------- Registro conversazione ----------------
 function addBubble(speaker, orig, tr, pending) {
@@ -427,7 +556,7 @@ function setStatus(text, isError) {
   s.classList.toggle("error", Boolean(isError));
 }
 
-$("#showOriginal").onchange = (e) => $("#log").classList.toggle("hide-orig", !e.target.checked);
+$("#showOriginal").onchange = (e) => document.body.classList.toggle("hide-orig", !e.target.checked);
 
 // Le voci clonate restano sul tuo account ElevenLabs finché non le elimini con "Elimina voce".
 

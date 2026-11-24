@@ -16,6 +16,19 @@ input, select { font-size: 16px; } /* sotto i 16px Safari ingrandisce la pagina 
 h1 { margin: 0; font-size: 1.6rem; }
 .sub { margin: 4px 0 0; color: var(--muted); }
 main { max-width: 1000px; margin: auto; padding: 16px; }
+.call-panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+.call-panel h2 { margin: 0 0 6px; font-size: 1.2rem; }
+.hint { color: var(--muted); font-size: .92rem; margin: 0 0 10px; }
+.call-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 12px; }
+@media (max-width: 720px) { .call-grid { grid-template-columns: 1fr; } }
+.call-grid input, .call-grid select { display: block; width: 100%; margin: 4px 0 0; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
+.call-btn { width: 100%; margin-top: 10px; padding: 16px; font-weight: 700; font-size: 1.1rem; background: #1f9d55; color: #fff; border: 0; }
+.call-btn.live { background: var(--danger); }
+#callStatus { text-align: center; color: var(--muted); margin: 8px 0 0; min-height: 1.4em; }
+#callStatus.error { color: var(--danger); }
+.call-panel.disabled .call-grid, .call-panel.disabled .call-btn { opacity: .5; pointer-events: none; }
+.msg.system { align-self: center; max-width: 92%; border-style: dashed; }
 .speakers { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 720px) { .speakers { grid-template-columns: 1fr; } }
 .speaker { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; border-top: 4px solid var(--a); }
@@ -42,7 +55,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 #level { height: 100%; width: 0; background: var(--b); transition: width 60ms linear; }
 #status { color: var(--muted); margin: 6px 0; min-height: 1.4em; }
 .small { font-size: .9rem; color: var(--muted); }
-#log { display: flex; flex-direction: column; gap: 10px; }
+#log, .log { display: flex; flex-direction: column; gap: 10px; }
+#callLog { margin-top: 12px; }
 .msg { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; max-width: 80%; }
 @media (max-width: 720px) {
   .msg { max-width: 92%; }
@@ -55,6 +69,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .msg .orig { color: var(--muted); font-size: .92rem; margin: 4px 0; }
 .msg .tr { font-size: 1.1rem; font-weight: 500; }
 .msg button { padding: 2px 8px; font-size: .8rem; margin-top: 6px; }
-.hide-orig .orig { display: none; }
+.hide-orig .orig, body.hide-orig .orig { display: none; }
 .msg.pending { opacity: .6; }
 .error { color: var(--danger); }

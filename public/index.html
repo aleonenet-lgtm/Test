@@ -22,6 +22,19 @@
   </header>
 
   <main>
+    <section class="call-panel" id="callPanel">
+      <h2>📞 Chiamata tradotta</h2>
+      <p class="hint">Chiama un numero di telefono normale: chi risponde sente la <strong>tua voce</strong> nella sua lingua, e tu senti la sua risposta tradotta. La tua lingua e la tua voce sono quelle della <strong>Persona A</strong> qui sotto.</p>
+      <div class="call-grid">
+        <label>Numero da chiamare <input id="callTo" type="tel" inputmode="tel" autocomplete="tel" placeholder="+44 20 7946 0958" /></label>
+        <label>Lingua di chi risponde <select id="calleeLang"></select></label>
+        <label>Codice di accesso <input id="callCode" type="password" autocomplete="current-password" /></label>
+      </div>
+      <button id="callBtn" class="call-btn">📞 Chiama</button>
+      <p id="callStatus"></p>
+      <div id="callLog" class="log" aria-live="polite"></div>
+    </section>
+
     <section class="speakers">
       <article class="speaker" data-id="a">
         <h2><input class="name" value="Persona A" aria-label="Nome" /></h2>
