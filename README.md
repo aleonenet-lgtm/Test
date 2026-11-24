@@ -1,0 +1,68 @@
+# Interprete Vocale
+
+Un'app web che traduce in tempo reale una conversazione tra due persone che parlano lingue diverse.
+Ognuno sente la traduzione **con la voce dell'altro**: la voce di chi parla viene clonata da un breve campione.
+
+## Come funziona
+
+Per ogni frase pronunciata:
+
+1. **Ascolto**: il browser rileva quando qualcuno inizia e smette di parlare (VAD) e invia il segmento audio.
+2. **Trascrizione**: ElevenLabs Scribe trascrive la frase e riconosce la lingua.
+3. **Chi parla**: dalla lingua rilevata l'app capisce se ha parlato la Persona A o la Persona B, e quindi in che direzione tradurre.
+4. **Traduzione**: Claude traduce tenendo conto delle ultime battute della conversazione.
+5. **Voce**: ElevenLabs legge la traduzione con la voce clonata di chi ha parlato, in streaming.
+
+Le frasi vengono elaborate in parallelo e riprodotte in ordine, così una frase viene già tradotta mentre si sta ancora pronunciando la successiva.
+
+## Requisiti
+
+- Node.js 20 o superiore
+- Una chiave API Anthropic: https://console.anthropic.com
+- Una chiave API ElevenLabs con un piano che includa la clonazione vocale (Instant Voice Cloning): https://elevenlabs.io
+
+## Installazione
+
+```bash
+npm install
+cp .env.example .env    # poi inserisci le due chiavi
+npm start
+```
+
+Apri http://localhost:3000 in Chrome, Edge o Safari.
+
+> Per usarlo da telefono serve HTTPS, perché il browser dà accesso al microfono solo su connessioni sicure (o su localhost).
+> Ad esempio: `npx localtunnel --port 3000`, oppure pubblica l'app su un hosting con HTTPS.
+
+## Uso
+
+1. Scegli nome e lingua per la **Persona A** e per la **Persona B**.
+2. **Clonazione della voce** (facoltativa ma consigliata): spunta la casella di consenso, premi *Registra voce* e leggi il testo proposto per circa 30 secondi in un ambiente silenzioso. In alternativa puoi caricare un file audio. Finché una voce non è clonata viene usata una voce predefinita.
+3. Scegli come conversare:
+   - **Mani libere**: premi *Avvia modalità mani libere*, metti il telefono o il PC tra voi due e parlate a turno. L'app capisce da sola chi sta parlando dalla lingua.
+   - **Tieni premuto per parlare**: ognuno tiene premuto il proprio pulsante mentre parla. È più affidabile in ambienti rumorosi o con lingue simili tra loro.
+4. Con gli **auricolari** spunta l'opzione apposita: l'app continua ad ascoltare anche mentre riproduce la traduzione, e la conversazione risulta davvero simultanea. Senza auricolari il microfono si mette in pausa durante la riproduzione, così l'app non traduce la propria voce.
+
+## Configurazione
+
+| Variabile | Predefinito | Note |
+|---|---|---|
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Modello usato per la traduzione |
+| `ELEVENLABS_TTS_MODEL` | `eleven_flash_v2_5` | `eleven_multilingual_v2` rende la voce più fedele, con un po' più di latenza |
+| `ELEVENLABS_STT_MODEL` | `scribe_v1` | Modello di trascrizione |
+| `ELEVENLABS_FALLBACK_VOICE_ID` | voce di libreria | Voce usata prima della clonazione |
+
+## Privacy e consenso
+
+- Clona la voce di una persona solo con il suo consenso esplicito: l'app non procede se la casella non è spuntata.
+- Le voci clonate restano salvate sul tuo account ElevenLabs. Il pulsante **Elimina voce** le cancella. Puoi anche rimuoverle dalla dashboard di ElevenLabs.
+- Audio e testi passano dai servizi di Anthropic ed ElevenLabs. Il server non salva nulla su disco: tiene in memoria solo l'audio delle traduzioni, per 5 minuti, per poterle riascoltare.
+
+## Struttura
+
+```
+server.js          API: /api/turn (trascrivi, traduci, prepara l'audio), /api/voices (clonazione), /api/tts/:id (audio in streaming)
+public/index.html  Interfaccia
+public/app.js      Microfono, rilevamento della voce, coda di riproduzione
+public/style.css   Stile (chiaro/scuro, adatto al telefono)
+```

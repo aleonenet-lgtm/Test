@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interprete Vocale</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Interprete Vocale</h1>
+    <p class="sub">Traduzione simultanea bidirezionale, con la voce di chi parla.</p>
+  </header>
+
+  <main>
+    <section class="speakers">
+      <article class="speaker" data-id="a">
+        <h2><input class="name" value="Persona A" aria-label="Nome" /></h2>
+        <label>Lingua <select class="lang"></select></label>
+        <div class="voice">
+          <p class="voice-status">Voce: predefinita</p>
+          <label class="consent"><input type="checkbox" class="consent-box" /> Questa persona acconsente alla clonazione della propria voce</label>
+          <div class="row">
+            <button class="rec-sample">🎙️ Registra voce (30 s)</button>
+            <label class="file-btn">📁 Carica audio<input type="file" class="sample-file" accept="audio/*" multiple hidden /></label>
+          </div>
+          <p class="read-text"></p>
+        </div>
+        <button class="ptt" data-speaker="a">Tieni premuto per parlare</button>
+      </article>
+
+      <article class="speaker" data-id="b">
+        <h2><input class="name" value="Persona B" aria-label="Nome" /></h2>
+        <label>Lingua <select class="lang"></select></label>
+        <div class="voice">
+          <p class="voice-status">Voce: predefinita</p>
+          <label class="consent"><input type="checkbox" class="consent-box" /> Questa persona acconsente alla clonazione della propria voce</label>
+          <div class="row">
+            <button class="rec-sample">🎙️ Registra voce (30 s)</button>
+            <label class="file-btn">📁 Carica audio<input type="file" class="sample-file" accept="audio/*" multiple hidden /></label>
+          </div>
+          <p class="read-text"></p>
+        </div>
+        <button class="ptt" data-speaker="b">Tieni premuto per parlare</button>
+      </article>
+    </section>
+
+    <section class="controls">
+      <button id="auto" class="primary">▶︎ Avvia modalità mani libere</button>
+      <div id="meter"><div id="level"></div></div>
+      <p id="status">Pronto.</p>
+      <label class="small"><input type="checkbox" id="showOriginal" checked /> Mostra testo originale</label>
+      <label class="small"><input type="checkbox" id="headphones" /> Usiamo gli auricolari (ascolto continuo anche durante la riproduzione)</label>
+    </section>
+
+    <section id="log" aria-live="polite"></section>
+  </main>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

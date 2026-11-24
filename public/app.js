@@ -1,0 +1,373 @@
+// Client: cattura microfono, rilevamento voce (VAD), invio dei segmenti,
+// riproduzione ordinata delle traduzioni con la voce clonata.
+
+const LANGS = {
+  it: "Italiano", en: "English", es: "Español", fr: "Français", de: "Deutsch", pt: "Português",
+  nl: "Nederlands", pl: "Polski", ro: "Română", ru: "Русский", uk: "Українська", ar: "العربية",
+  zh: "中文", ja: "日本語", ko: "한국어", hi: "हिन्दी", tr: "Türkçe", el: "Ελληνικά", sv: "Svenska",
+  cs: "Čeština", hu: "Magyar", he: "עברית", id: "Bahasa Indonesia", vi: "Tiếng Việt", th: "ไทย",
+  fil: "Filipino", sq: "Shqip", bn: "বাংলা",
+};
+
+// Testo da leggere per registrare un buon campione vocale (~30 s).
+const READ_TEXTS = {
+  it: "Leggi ad alta voce: «Buongiorno, sono felice di parlare con te oggi. Mi piace viaggiare, conoscere persone nuove e assaggiare la cucina di posti diversi. Quando ho tempo libero leggo un libro, faccio una passeggiata al parco oppure cucino qualcosa di speciale per la mia famiglia e i miei amici.»",
+  en: "Read aloud: “Good morning, I'm happy to talk with you today. I love travelling, meeting new people and tasting food from different places. When I have some free time I read a book, take a walk in the park, or cook something special for my family and friends.”",
+  es: "Lee en voz alta: «Buenos días, estoy feliz de hablar contigo hoy. Me encanta viajar, conocer gente nueva y probar la comida de lugares diferentes. Cuando tengo tiempo libre leo un libro, paseo por el parque o cocino algo especial para mi familia y mis amigos.»",
+  fr: "Lisez à voix haute : « Bonjour, je suis heureux de parler avec vous aujourd'hui. J'adore voyager, rencontrer de nouvelles personnes et goûter la cuisine d'autres pays. Quand j'ai du temps libre, je lis un livre, je me promène au parc ou je cuisine quelque chose de spécial pour ma famille et mes amis. »",
+  de: "Bitte laut vorlesen: „Guten Morgen, ich freue mich, heute mit Ihnen zu sprechen. Ich reise gern, lerne neue Menschen kennen und probiere das Essen aus verschiedenen Ländern. Wenn ich Zeit habe, lese ich ein Buch, gehe im Park spazieren oder koche etwas Besonderes für meine Familie und Freunde.“",
+  pt: "Leia em voz alta: «Bom dia, fico feliz em conversar com você hoje. Adoro viajar, conhecer pessoas novas e provar a comida de lugares diferentes. Quando tenho tempo livre, leio um livro, passeio no parque ou cozinho algo especial para a minha família e os meus amigos.»",
+};
+const readTextFor = (l) => READ_TEXTS[l] || "Parla liberamente nella tua lingua per circa 30 secondi, con tono naturale.";
+
+const TARGET_RATE = 16000;
+const $ = (s, el = document) => el.querySelector(s);
+
+// ---------------- Stato ----------------
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const speakers = store.get("speakers", {
+  a: { name: "Persona A", lang: "it", voiceId: null },
+  b: { name: "Persona B", lang: "en", voiceId: null },
+});
+const history = []; // { speaker, original }
+let lastSpeaker = null;
+const recentOutputs = []; // { text, at } per scartare l'eco degli altoparlanti
+
+// ---------------- Microfono ----------------
+let audioCtx, sampleRate, micReady;
+const chunkListeners = new Set();
+
+async function ensureMic() {
+  if (micReady) return micReady;
+  micReady = (async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    audioCtx = new AudioContext();
+    sampleRate = audioCtx.sampleRate;
+    const workletSrc = `
+      class Tap extends AudioWorkletProcessor {
+        constructor() { super(); this.buf = new Float32Array(2048); this.n = 0; }
+        process(inputs) {
+          const ch = inputs[0] && inputs[0][0];
+          if (ch) for (let i = 0; i < ch.length; i++) {
+            this.buf[this.n++] = ch[i];
+            if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice()); this.n = 0; }
+          }
+          return true;
+        }
+      }
+      registerProcessor("tap", Tap);`;
+    const url = URL.createObjectURL(new Blob([workletSrc], { type: "application/javascript" }));
+    await audioCtx.audioWorklet.addModule(url);
+    const src = audioCtx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(audioCtx, "tap");
+    node.port.onmessage = (e) => chunkListeners.forEach((fn) => fn(e.data));
+    src.connect(node);
+    // Il nodo deve essere collegato per essere eseguito: uscita a volume zero.
+    const mute = audioCtx.createGain();
+    mute.gain.value = 0;
+    node.connect(mute).connect(audioCtx.destination);
+  })();
+  try { await micReady; } catch (e) { micReady = null; throw e; }
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+}
+
+const rms = (a) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / a.length); };
+
+function toWav(chunks) {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const ratio = sampleRate / TARGET_RATE;
+  const outLen = Math.floor(total / ratio);
+  const flat = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { flat.set(c, off); off += c.length; }
+  const pcm = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const start = Math.floor(i * ratio), end = Math.min(total, Math.floor((i + 1) * ratio));
+    let s = 0;
+    for (let j = start; j < end; j++) s += flat[j];
+    const v = Math.max(-1, Math.min(1, s / Math.max(1, end - start)));
+    pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  const buf = new ArrayBuffer(44 + pcm.byteLength);
+  const dv = new DataView(buf);
+  const w = (o, s) => [...s].forEach((ch, i) => dv.setUint8(o + i, ch.charCodeAt(0)));
+  w(0, "RIFF"); dv.setUint32(4, 36 + pcm.byteLength, true); w(8, "WAVE"); w(12, "fmt ");
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, TARGET_RATE, true); dv.setUint32(28, TARGET_RATE * 2, true);
+  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); w(36, "data"); dv.setUint32(40, pcm.byteLength, true);
+  new Int16Array(buf, 44).set(pcm);
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+// ---------------- Interfaccia oratori ----------------
+for (const card of document.querySelectorAll(".speaker")) {
+  const id = card.dataset.id;
+  const sp = speakers[id];
+  const sel = $(".lang", card);
+  for (const [code, label] of Object.entries(LANGS)) sel.add(new Option(label, code));
+  sel.value = sp.lang;
+  $(".name", card).value = sp.name;
+  $(".read-text", card).textContent = readTextFor(sp.lang);
+  sel.onchange = () => { sp.lang = sel.value; $(".read-text", card).textContent = readTextFor(sp.lang); save(); };
+  $(".name", card).oninput = (e) => { sp.name = e.target.value || id.toUpperCase(); save(); };
+  $(".rec-sample", card).onclick = () => recordSample(id, card);
+  $(".sample-file", card).onchange = (e) => uploadSample(id, card, [...e.target.files]);
+  renderVoice(id);
+
+  const ptt = $(".ptt", card);
+  ptt.addEventListener("pointerdown", (e) => { e.preventDefault(); ptt.setPointerCapture(e.pointerId); startPTT(id, ptt); });
+  ptt.addEventListener("pointerup", () => stopPTT(id, ptt));
+  ptt.addEventListener("pointercancel", () => stopPTT(id, ptt));
+}
+
+function save() { store.set("speakers", speakers); }
+
+function renderVoice(id) {
+  const card = document.querySelector(`.speaker[data-id="${id}"]`);
+  const st = $(".voice-status", card);
+  st.innerHTML = "";
+  if (speakers[id].voiceId) {
+    st.append("Voce: ✅ clonata ");
+    const del = document.createElement("button");
+    del.textContent = "Elimina voce";
+    del.onclick = () => deleteVoice(id);
+    st.append(del);
+  } else {
+    st.textContent = "Voce: predefinita (non ancora clonata)";
+  }
+}
+
+function checkConsent(card) {
+  if ($(".consent-box", card).checked) return true;
+  setStatus("Spunta la casella di consenso prima di clonare la voce.", true);
+  return false;
+}
+
+async function recordSample(id, card) {
+  if (!checkConsent(card)) return;
+  const btn = $(".rec-sample", card);
+  if (btn._stop) return btn._stop();
+  try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
+  const chunks = [];
+  const fn = (c) => chunks.push(c);
+  chunkListeners.add(fn);
+  const started = Date.now();
+  btn.classList.add("recording");
+  const timer = setInterval(() => {
+    const s = Math.round((Date.now() - started) / 1000);
+    btn.textContent = `⏹ Stop (${s}s / 30s)`;
+    if (s >= 30) btn._stop();
+  }, 250);
+  btn._stop = async () => {
+    clearInterval(timer);
+    chunkListeners.delete(fn);
+    btn._stop = null;
+    btn.classList.remove("recording");
+    btn.textContent = "🎙️ Registra voce (30 s)";
+    const secs = (Date.now() - started) / 1000;
+    if (secs < 10) return setStatus("Campione troppo breve: servono almeno 10 secondi.", true);
+    await sendVoice(id, [new File([toWav(chunks)], "campione.wav", { type: "audio/wav" })]);
+  };
+}
+
+async function uploadSample(id, card, files) {
+  if (!files.length || !checkConsent(card)) return;
+  await sendVoice(id, files);
+}
+
+async function sendVoice(id, files) {
+  setStatus(`Clonazione della voce di ${speakers[id].name}…`);
+  const fd = new FormData();
+  fd.append("name", speakers[id].name);
+  fd.append("consent", "true");
+  files.forEach((f) => fd.append("samples", f));
+  try {
+    const r = await fetch("/api/voices", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+    if (speakers[id].voiceId) deleteVoice(id, true);
+    speakers[id].voiceId = data.voiceId;
+    save();
+    renderVoice(id);
+    setStatus(`Voce di ${speakers[id].name} clonata. Ora le traduzioni useranno la sua voce.`);
+  } catch (e) {
+    setStatus("Clonazione non riuscita: " + e.message, true);
+  }
+}
+
+async function deleteVoice(id, silent) {
+  const v = speakers[id].voiceId;
+  if (!v) return;
+  speakers[id].voiceId = null;
+  save();
+  renderVoice(id);
+  try { await fetch(`/api/voices/${encodeURIComponent(v)}`, { method: "DELETE", keepalive: true }); } catch {}
+  if (!silent) setStatus(`Voce di ${speakers[id].name} eliminata.`);
+}
+
+// ---------------- Pipeline dei turni ----------------
+let seq = 0;
+let playChain = Promise.resolve();
+let playing = false;
+let suppressUntil = 0;
+const headphones = () => $("#headphones")?.checked;
+
+function sendSegment(chunks, forcedSpeaker) {
+  const wav = toWav(chunks);
+  const n = ++seq;
+  const bubble = addBubble(forcedSpeaker || lastSpeaker || "a", "…", "Traduzione in corso…", true);
+  const fd = new FormData();
+  fd.append("audio", wav, `seg-${n}.wav`);
+  fd.append("config", JSON.stringify({ a: speakers.a, b: speakers.b, history: history.slice(-8), forcedSpeaker, lastSpeaker }));
+  const result = fetch("/api/turn", { method: "POST", body: fd }).then(async (r) => {
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    return data;
+  });
+
+  // La riproduzione rispetta l'ordine di arrivo dei segmenti.
+  playChain = playChain.then(async () => {
+    let data;
+    try { data = await result; } catch (e) { bubble.remove(); return setStatus("Errore: " + e.message, true); }
+    if (data.empty || isEcho(data.original)) { bubble.remove(); return; }
+    lastSpeaker = data.speaker;
+    history.push({ speaker: speakers[data.speaker].name, original: data.original });
+    fillBubble(bubble, data);
+    recentOutputs.push({ text: data.translation, at: Date.now() });
+    await play(data.audioUrl);
+  });
+}
+
+function play(url) {
+  return new Promise((resolve) => {
+    const audio = new Audio(url);
+    playing = true;
+    const done = () => { playing = false; suppressUntil = Date.now() + 400; resolve(); };
+    audio.onended = done;
+    audio.onerror = () => { setStatus("Riproduzione audio non riuscita.", true); done(); };
+    audio.play().catch(done);
+  });
+}
+
+// Scarta i segmenti che sono in realtà l'eco di una traduzione appena riprodotta.
+function isEcho(text) {
+  const words = (t) => new Set(t.toLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}\s]/gu, "").split(/\s+/).filter(Boolean));
+  const w = words(text);
+  if (!w.size) return true;
+  const now = Date.now();
+  return recentOutputs.some((o) => {
+    if (now - o.at > 30_000) return false;
+    const ow = words(o.text);
+    let common = 0;
+    w.forEach((x) => ow.has(x) && common++);
+    return common / w.size > 0.6;
+  });
+}
+
+// ---------------- Push-to-talk ----------------
+const ptt = { chunks: null, fn: null };
+async function startPTT(id, btn) {
+  try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
+  ptt.chunks = [];
+  ptt.fn = (c) => ptt.chunks.push(c);
+  chunkListeners.add(ptt.fn);
+  btn.classList.add("active");
+  btn.textContent = "Sto ascoltando… rilascia per tradurre";
+}
+function stopPTT(id, btn) {
+  if (!ptt.fn) return;
+  chunkListeners.delete(ptt.fn);
+  btn.classList.remove("active");
+  btn.textContent = "Tieni premuto per parlare";
+  const chunks = ptt.chunks;
+  ptt.fn = ptt.chunks = null;
+  const secs = chunks.reduce((n, c) => n + c.length, 0) / sampleRate;
+  if (secs > 0.4) sendSegment(chunks, id);
+}
+
+// ---------------- Mani libere (VAD) ----------------
+const vad = { on: false, fn: null };
+$("#auto").onclick = async () => {
+  const btn = $("#auto");
+  if (vad.on) {
+    chunkListeners.delete(vad.fn);
+    vad.on = false;
+    btn.classList.remove("on");
+    btn.textContent = "▶︎ Avvia modalità mani libere";
+    $("#level").style.width = "0";
+    return setStatus("Ascolto interrotto.");
+  }
+  try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
+  vad.on = true;
+  btn.classList.add("on");
+  btn.textContent = "■ Ferma ascolto";
+  setStatus(`In ascolto: parlate a turno in ${LANGS[speakers.a.lang]} o ${LANGS[speakers.b.lang]}.`);
+
+  const chunkMs = (2048 / sampleRate) * 1000;
+  const PRE_ROLL = Math.ceil(300 / chunkMs);
+  const END_SILENCE_MS = 700, MIN_SPEECH_MS = 300, MAX_SEGMENT_MS = 12000;
+  let floor = 0.005, inSpeech = false, seg = [], pre = [], speechMs = 0, silenceMs = 0;
+
+  vad.fn = (c) => {
+    const level = rms(c);
+    $("#level").style.width = Math.min(100, level * 900) + "%";
+    const muted = !headphones() && (playing || Date.now() < suppressUntil);
+    if (muted) { inSpeech = false; seg = []; pre = []; return; }
+    const thr = Math.max(0.012, floor * 3.5);
+    if (!inSpeech) {
+      floor = floor * 0.97 + Math.min(level, 0.05) * 0.03;
+      pre.push(c);
+      if (pre.length > PRE_ROLL) pre.shift();
+      if (level > thr) { inSpeech = true; seg = [...pre]; pre = []; speechMs = 0; silenceMs = 0; }
+      return;
+    }
+    seg.push(c);
+    if (level > thr) { speechMs += chunkMs; silenceMs = 0; } else silenceMs += chunkMs;
+    if (silenceMs >= END_SILENCE_MS || seg.length * chunkMs >= MAX_SEGMENT_MS) {
+      if (speechMs >= MIN_SPEECH_MS) sendSegment(seg, null);
+      inSpeech = false; seg = [];
+    }
+  };
+  chunkListeners.add(vad.fn);
+};
+
+// ---------------- Registro conversazione ----------------
+function addBubble(speaker, orig, tr, pending) {
+  const el = document.createElement("div");
+  el.className = `msg ${speaker}` + (pending ? " pending" : "");
+  el.innerHTML = `<div class="who"></div><div class="orig"></div><div class="tr"></div>`;
+  $(".who", el).textContent = speakers[speaker].name;
+  $(".orig", el).textContent = orig;
+  $(".tr", el).textContent = tr;
+  $("#log").prepend(el);
+  return el;
+}
+function fillBubble(el, d) {
+  el.className = `msg ${d.speaker}`;
+  $(".who", el).textContent = `${speakers[d.speaker].name} · ${LANGS[d.from] || d.from} → ${LANGS[d.to] || d.to}`;
+  $(".orig", el).textContent = d.original;
+  $(".tr", el).textContent = d.translation;
+  const again = document.createElement("button");
+  again.textContent = "🔊 Riascolta";
+  again.onclick = () => { playChain = playChain.then(() => play(d.audioUrl)); };
+  el.append(again);
+}
+
+function setStatus(text, isError) {
+  const s = $("#status");
+  s.textContent = text;
+  s.classList.toggle("error", Boolean(isError));
+}
+
+$("#showOriginal").onchange = (e) => $("#log").classList.toggle("hide-orig", !e.target.checked);
+
+// Le voci clonate restano sul tuo account ElevenLabs finché non le elimini con "Elimina voce".
+
+fetch("/api/health").then((r) => r.json()).then((h) => {
+  if (!h.elevenlabs) setStatus("Configura ELEVENLABS_API_KEY sul server per abilitare voce e trascrizione.", true);
+}).catch(() => {});
