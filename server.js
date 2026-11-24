@@ -8,8 +8,8 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ELEVEN_KEY, TTS_MODEL, CLAUDE_MODEL, FALLBACK_VOICE, Anthropic,
-  eleven, transcribe, translate, synthesize, isBlank,
+  ELEVEN_KEY, FALLBACK_VOICE, Anthropic,
+  eleven, transcribe, translate, synthesize, isBlank, ACCESS_CODE, checkAccessCode, VOICE_PREFIX,
 } from "./lib.js";
 import { attachCalls, callRoutes } from "./call.js";
 
@@ -20,6 +20,16 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(here, "public")));
+
+// Codice di accesso richiesto per le funzioni a pagamento. Il link audio /api/tts/:token
+// non lo richiede: è firmato dal server e l'elemento <audio> non può inviare intestazioni.
+// Nota: dentro app.use("/api", …) req.path è relativo a /api (es. "/health").
+const OPEN_PATHS = new Set(["/health", "/call/config"]);
+app.use("/api", (req, res, next) => {
+  if (OPEN_PATHS.has(req.path) || req.path.startsWith("/tts/")) return next();
+  if (checkAccessCode(req.get("X-Access-Code"))) return next();
+  res.status(401).json({ error: "Codice di accesso mancante o errato.", code: "access_code" });
+});
 
 function audioBlob(file) {
   return new Blob([file.buffer], { type: file.mimetype || "audio/wav" });
@@ -34,7 +44,7 @@ app.post("/api/voices", upload.array("samples", 5), async (req, res) => {
     }
     if (!req.files?.length) return res.status(400).json({ error: "Nessun campione audio ricevuto." });
     const form = new FormData();
-    form.append("name", `traduttore-${(req.body.name || "voce").slice(0, 40)}-${Date.now()}`);
+    form.append("name", `${VOICE_PREFIX}${String(req.body.name || "voce").slice(0, 40)}-${Date.now()}`);
     form.append("description", "Voce temporanea per traduzione simultanea");
     form.append("remove_background_noise", "true");
     req.files.forEach((f, i) => form.append("files", audioBlob(f), f.originalname || `campione-${i}.wav`));
@@ -49,7 +59,13 @@ app.post("/api/voices", upload.array("samples", 5), async (req, res) => {
 
 app.delete("/api/voices/:id", async (req, res) => {
   try {
-    await eleven(`/v1/voices/${encodeURIComponent(req.params.id)}`, { method: "DELETE" });
+    const voicePath = `/v1/voices/${encodeURIComponent(req.params.id)}`;
+    // Si eliminano solo le voci create da questa app, mai le altre voci dell'account.
+    const voice = await (await eleven(voicePath)).json();
+    if (!String(voice.name || "").startsWith(VOICE_PREFIX)) {
+      return res.status(403).json({ error: "Questa voce non è stata creata dall'app e non può essere eliminata da qui." });
+    }
+    await eleven(voicePath, { method: "DELETE" });
     res.json({ ok: true });
   } catch (e) {
     res.status(502).json({ error: e.message });
@@ -121,9 +137,15 @@ app.get("/api/tts/:token", async (req, res) => {
 app.post("/api/turn", upload.single("audio"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Audio mancante." });
-    const cfg = JSON.parse(req.body.config || "{}");
-    const { a, b, history = [], forcedSpeaker = null } = cfg; // a/b: { name, lang, voiceId }
+    let cfg;
+    try { cfg = JSON.parse(req.body.config || "{}"); } catch { return res.status(400).json({ error: "Configurazione non valida." }); }
+    const { a, b } = cfg; // a/b: { name, lang, voiceId }
+    const forcedSpeaker = cfg.forcedSpeaker === "a" || cfg.forcedSpeaker === "b" ? cfg.forcedSpeaker : null;
     if (!a?.lang || !b?.lang) return res.status(400).json({ error: "Configura le lingue." });
+    const history = (Array.isArray(cfg.history) ? cfg.history : []).slice(-8).map((h) => ({
+      speaker: String(h?.speaker ?? "").slice(0, 40),
+      original: String(h?.original ?? "").slice(0, 1000),
+    }));
 
     // 1) Trascrizione
     const stt = await transcribe(req.file.buffer, {
@@ -174,7 +196,7 @@ app.post("/api/turn", upload.single("audio"), async (req, res) => {
 });
 
 app.get("/api/health", (_req, res) =>
-  res.json({ ok: true, elevenlabs: Boolean(ELEVEN_KEY), claudeModel: CLAUDE_MODEL, ttsModel: TTS_MODEL }),
+  res.json({ ok: true, elevenlabs: Boolean(ELEVEN_KEY), codeRequired: Boolean(ACCESS_CODE) }),
 );
 
 // Su Vercel l'app viene esportata e avviata dalla piattaforma; in locale ascolta sulla porta.

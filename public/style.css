@@ -19,7 +19,7 @@ main { max-width: 1000px; margin: auto; padding: 16px; }
 .call-panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
 .call-panel h2 { margin: 0 0 6px; font-size: 1.2rem; }
 .hint { color: var(--muted); font-size: .92rem; margin: 0 0 10px; }
-.call-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 12px; }
+.call-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 12px; }
 @media (max-width: 720px) { .call-grid { grid-template-columns: 1fr; } }
 .call-grid input, .call-grid select { display: block; width: 100%; margin: 4px 0 0; padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
@@ -72,3 +72,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .hide-orig .orig, body.hide-orig .orig { display: none; }
 .msg.pending { opacity: .6; }
 .error { color: var(--danger); }
+.access-bar { margin-top: 12px; }
+.access-bar input { display: block; width: 100%; max-width: 360px; margin-top: 4px; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--card); color: var(--text); font: inherit; }
+.access-bar.missing input { border-color: var(--danger); }

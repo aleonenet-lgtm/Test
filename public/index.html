@@ -19,6 +19,9 @@
   <header>
     <h1>Interprete Vocale</h1>
     <p class="sub">Traduzione simultanea bidirezionale, con la voce di chi parla.</p>
+    <div id="accessBar" class="access-bar" hidden>
+      <label>Codice di accesso <input id="accessCode" type="password" autocomplete="current-password" /></label>
+    </div>
   </header>
 
   <main>
@@ -28,7 +31,6 @@
       <div class="call-grid">
         <label>Numero da chiamare <input id="callTo" type="tel" inputmode="tel" autocomplete="tel" placeholder="+44 20 7946 0958" /></label>
         <label>Lingua di chi risponde <select id="calleeLang"></select></label>
-        <label>Codice di accesso <input id="callCode" type="password" autocomplete="current-password" /></label>
       </div>
       <button id="callBtn" class="call-btn">📞 Chiama</button>
       <p id="callStatus"></p>

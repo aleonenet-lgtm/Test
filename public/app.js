@@ -32,6 +32,24 @@ const speakers = store.get("speakers", {
   a: { name: "Persona A", lang: "it", voiceId: null },
   b: { name: "Persona B", lang: "en", voiceId: null },
 });
+// Codice di accesso: inviato con ogni richiesta a pagamento.
+const accessInput = $("#accessCode");
+accessInput.value = store.get("accessCode", "") || store.get("callCode", "");
+accessInput.oninput = () => { store.set("accessCode", accessInput.value.trim()); $("#accessBar").classList.remove("missing"); };
+const accessCode = () => accessInput.value.trim();
+
+async function api(url, init = {}) {
+  const r = await fetch(url, { ...init, headers: { ...(init.headers || {}), "X-Access-Code": accessCode() } });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && data.code === "access_code") {
+    $("#accessBar").hidden = false;
+    $("#accessBar").classList.add("missing");
+    accessInput.focus();
+  }
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
 const history = []; // { speaker, original }
 let lastSpeaker = null;
 const recentOutputs = []; // { text, at } per scartare l'eco degli altoparlanti
@@ -110,7 +128,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && audioCtx && audioCtx.state !== "running") {
     audioCtx.resume().catch(() => setStatus("Tocca lo schermo per riattivare l'audio.", true));
   }
-  if (document.visibilityState === "visible" && vad.on) keepAwake();
+  if (document.visibilityState === "visible" && (vad.on || call.active)) keepAwake();
 });
 document.addEventListener("touchend", () => audioCtx && audioCtx.state !== "running" && audioCtx.resume(), { passive: true });
 
@@ -194,10 +212,12 @@ function checkConsent(card) {
 }
 
 async function recordSample(id, card) {
-  if (!checkConsent(card)) return;
   const btn = $(".rec-sample", card);
   if (btn._stop) return btn._stop();
+  if (!checkConsent(card)) return;
+  if (call.active) return setStatus("Non puoi registrare il campione durante una chiamata.", true);
   primeAudio();
+  stopHandsFree(); // altrimenti il testo letto verrebbe anche tradotto
   try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
   const chunks = [];
   const fn = (c) => chunks.push(c);
@@ -233,9 +253,7 @@ async function sendVoice(id, files) {
   fd.append("consent", "true");
   files.forEach((f) => fd.append("samples", f));
   try {
-    const r = await fetch("/api/voices", { method: "POST", body: fd });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error);
+    const data = await api("/api/voices", { method: "POST", body: fd });
     if (speakers[id].voiceId) deleteVoice(id, true);
     speakers[id].voiceId = data.voiceId;
     save();
@@ -252,7 +270,7 @@ async function deleteVoice(id, silent) {
   speakers[id].voiceId = null;
   save();
   renderVoice(id);
-  try { await fetch(`/api/voices/${encodeURIComponent(v)}`, { method: "DELETE", keepalive: true }); } catch {}
+  try { await api(`/api/voices/${encodeURIComponent(v)}`, { method: "DELETE", keepalive: true }); } catch {}
   if (!silent) setStatus(`Voce di ${speakers[id].name} eliminata.`);
 }
 
@@ -270,11 +288,7 @@ function sendSegment(chunks, forcedSpeaker) {
   const fd = new FormData();
   fd.append("audio", wav, `seg-${n}.wav`);
   fd.append("config", JSON.stringify({ a: speakers.a, b: speakers.b, history: history.slice(-8), forcedSpeaker, lastSpeaker }));
-  const result = fetch("/api/turn", { method: "POST", body: fd }).then(async (r) => {
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || r.statusText);
-    return data;
-  });
+  const result = api("/api/turn", { method: "POST", body: fd });
 
   // La riproduzione rispetta l'ordine di arrivo dei segmenti.
   playChain = playChain.then(async () => {
@@ -285,6 +299,7 @@ function sendSegment(chunks, forcedSpeaker) {
     history.push({ speaker: speakers[data.speaker].name, original: data.original });
     fillBubble(bubble, data);
     recentOutputs.push({ text: data.translation, at: Date.now() });
+    while (recentOutputs.length > 20) recentOutputs.shift();
     await play(data.audioUrl);
   });
 }
@@ -329,10 +344,14 @@ function isEcho(text) {
 }
 
 // ---------------- Push-to-talk ----------------
-const ptt = { chunks: null, fn: null };
+const ptt = { chunks: null, fn: null, pressed: null };
 async function startPTT(id, btn) {
+  if (call.active) return setStatus("Durante la chiamata parla normalmente: la traduzione è automatica.", true);
+  ptt.pressed = id;
   primeAudio();
-  try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
+  try { await ensureMic(); } catch (e) { ptt.pressed = null; return setStatus("Microfono non disponibile: " + e.message, true); }
+  // Rilasciato mentre il microfono si attivava (es. durante la richiesta di permesso): niente da registrare.
+  if (ptt.pressed !== id) return;
   ptt.chunks = [];
   ptt.fn = (c) => ptt.chunks.push(c);
   chunkListeners.add(ptt.fn);
@@ -340,6 +359,7 @@ async function startPTT(id, btn) {
   btn.textContent = "Sto ascoltando… rilascia per tradurre";
 }
 function stopPTT(id, btn) {
+  if (ptt.pressed === id) ptt.pressed = null;
   if (!ptt.fn) return;
   chunkListeners.delete(ptt.fn);
   btn.classList.remove("active");
@@ -403,18 +423,18 @@ $("#auto").onclick = async () => {
   btn.classList.add("on");
   btn.textContent = "■ Ferma ascolto";
   setStatus(`In ascolto: parlate a turno in ${LANGS[speakers.a.lang]} o ${LANGS[speakers.b.lang]}.`);
-  vad.fn = createVad((seg) => sendSegment(seg, null));
+  const listen = createVad((seg) => sendSegment(seg, null));
+  vad.fn = (c) => { if (!ptt.fn) listen(c); };
   chunkListeners.add(vad.fn);
 };
 
 // ---------------- Chiamata telefonica tradotta ----------------
-const call = { active: false, ws: null, fn: null, timer: null, startedAt: 0, answered: false };
+const call = { active: false, ws: null, fn: null, timer: null, startedAt: 0, answered: false, attempt: 0 };
 const calleeSel = $("#calleeLang");
 for (const [code, label] of Object.entries(LANGS)) calleeSel.add(new Option(label, code));
 calleeSel.value = store.get("calleeLang", "en");
 calleeSel.onchange = () => store.set("calleeLang", calleeSel.value);
 $("#callTo").value = store.get("callTo", "");
-$("#callCode").value = store.get("callCode", "");
 
 fetch("/api/call/config").then((r) => r.json()).then((c) => {
   if (!c.enabled) {
@@ -440,25 +460,40 @@ $("#callBtn").onclick = async () => {
   primeAudio();
   const to = normalizeNumber($("#callTo").value);
   if (!/^\+[1-9]\d{6,14}$/.test(to)) return setCallStatus("Scrivi il numero con il prefisso internazionale, es. +44 20 7946 0958.", true);
-  const code = $("#callCode").value.trim();
-  if (!code) return setCallStatus("Inserisci il codice di accesso.", true);
+  const code = accessCode();
+  if (!code) {
+    $("#accessBar").hidden = false;
+    $("#accessBar").classList.add("missing");
+    return setCallStatus("Inserisci il codice di accesso in alto.", true);
+  }
   store.set("callTo", $("#callTo").value);
-  store.set("callCode", code);
-  try { await ensureMic(); } catch (e) { return setCallStatus("Microfono non disponibile: " + e.message, true); }
-  stopHandsFree();
 
+  // Stato attivo subito: un secondo tocco ora riaggancia invece di avviare un'altra chiamata.
+  const attempt = ++call.attempt;
   call.active = true;
   call.answered = false;
-  keepAwake();
   $("#callBtn").classList.add("live");
   $("#callBtn").textContent = "Riaggancia";
   setCallStatus("Avvio della chiamata…");
+  try {
+    await ensureMic();
+  } catch (e) {
+    if (call.attempt === attempt) { endCallUi(); setCallStatus("Microfono non disponibile: " + e.message, true); }
+    return;
+  }
+  if (call.attempt !== attempt || !call.active) return; // annullata mentre il microfono si attivava
+  stopHandsFree();
+  keepAwake();
 
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/call`);
   ws.binaryType = "arraybuffer";
   call.ws = ws;
-  ws.onopen = () => ws.send(JSON.stringify({ type: "start", to, code, calleeLang: calleeSel.value, me: speakers.a }));
+  ws.onopen = () => {
+    if (call.ws !== ws) return ws.close(); // riagganciato mentre si connetteva
+    ws.send(JSON.stringify({ type: "start", to, code, calleeLang: calleeSel.value, me: speakers.a }));
+  };
   ws.onmessage = (e) => {
+    if (call.ws !== ws) return;
     if (typeof e.data !== "string") {
       // Traduzione di ciò che ha detto l'altra persona: la riproduciamo in ordine.
       const url = URL.createObjectURL(new Blob([e.data], { type: "audio/mpeg" }));
@@ -468,10 +503,14 @@ $("#callBtn").onclick = async () => {
     const msg = JSON.parse(e.data);
     if (msg.type === "status") onCallStatus(msg.status);
     else if (msg.type === "line") addCallLine(msg);
-    else if (msg.type === "error") setCallStatus(msg.message, true);
+    else if (msg.type === "error") {
+      // Gli errori di una singola frase restano visibili nel registro; quelli gravi nello stato.
+      if (msg.fatal || !call.answered) setCallStatus(msg.message, true);
+      else addCallLine({ who: "system", original: "⚠️ " + msg.message, translation: "" });
+    }
   };
-  ws.onclose = () => endCallUi();
-  ws.onerror = () => setCallStatus("Connessione al server interrotta.", true);
+  ws.onclose = () => { if (call.ws === ws) endCallUi(); };
+  ws.onerror = () => { if (call.ws === ws) setCallStatus("Connessione al server interrotta.", true); };
 };
 
 function onCallStatus(status) {
@@ -499,8 +538,12 @@ function onCallStatus(status) {
 }
 
 function hangUp() {
-  if (call.ws?.readyState === 1) call.ws.send(JSON.stringify({ type: "hangup" }));
-  else endCallUi();
+  const ws = call.ws;
+  if (ws?.readyState === WebSocket.OPEN) return ws.send(JSON.stringify({ type: "hangup" }));
+  // Ancora in connessione: si chiude subito, così la chiamata non parte.
+  endCallUi();
+  try { ws?.close(); } catch {}
+  setCallStatus("Chiamata annullata.");
 }
 
 function endCallUi() {
@@ -522,7 +565,7 @@ function addCallLine({ who, original, translation }) {
   el.className = `msg ${who === "me" ? "a" : who === "them" ? "b" : "system"}`;
   el.innerHTML = `<div class="who"></div><div class="orig"></div><div class="tr"></div>`;
   $(".who", el).textContent =
-    who === "me" ? `${speakers.a.name} (tu)` : who === "them" ? "Interlocutore" : "Avviso automatico a chi risponde";
+    who === "me" ? `${speakers.a.name} (tu)` : who === "them" ? "Interlocutore" : translation ? "Avviso automatico a chi risponde" : "Avviso";
   $(".orig", el).textContent = original;
   $(".tr", el).textContent = translation;
   $("#callLog").prepend(el);
@@ -561,5 +604,6 @@ $("#showOriginal").onchange = (e) => document.body.classList.toggle("hide-orig",
 // Le voci clonate restano sul tuo account ElevenLabs finché non le elimini con "Elimina voce".
 
 fetch("/api/health").then((r) => r.json()).then((h) => {
+  if (h.codeRequired) $("#accessBar").hidden = false;
   if (!h.elevenlabs) setStatus("Configura ELEVENLABS_API_KEY sul server per abilitare voce e trascrizione.", true);
 }).catch(() => {});

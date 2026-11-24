@@ -9,19 +9,19 @@
 import crypto from "node:crypto";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { transcribe, translate, synthesize, isBlank } from "./lib.js";
+import { transcribe, translate, synthesize, isBlank, ACCESS_CODE, checkAccessCode } from "./lib.js";
 
 const TW_SID = process.env.TWILIO_ACCOUNT_SID;
 const TW_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TW_FROM = process.env.TWILIO_PHONE_NUMBER;
 const TW_API = process.env.TWILIO_API_BASE || "https://api.twilio.com";
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
-const ACCESS_CODE = process.env.CALL_ACCESS_CODE;
 const MAX_MINUTES = Number(process.env.CALL_MAX_MINUTES || 30);
 
 const SUPPORTED = new Set(["it", "en", "es", "fr", "de", "pt", "nl", "pl", "ro", "ru", "uk", "ar", "zh", "ja", "ko",
   "hi", "tr", "el", "sv", "cs", "hu", "he", "id", "vi", "th", "fil", "sq", "bn"]);
 
+// Le chiamate costano: senza codice di accesso configurato restano disattivate.
 export const callsEnabled = () =>
   Boolean(TW_SID && TW_TOKEN && TW_FROM && PUBLIC_URL && ACCESS_CODE && !process.env.VERCEL);
 
@@ -51,6 +51,7 @@ function fromTwilio(req) {
   return sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
 
+// Confronto a tempo costante dei codici segreti.
 const sameSecret = (a, b) => {
   const x = crypto.createHash("sha256").update(String(a)).digest();
   const y = crypto.createHash("sha256").update(String(b)).digest();
@@ -148,6 +149,9 @@ class CallSession {
     this.streamSid = null;
     this.callSid = null;
     this.ended = false;
+    this.isAnswered = false;
+    // Si risolve quando l'altra persona risponde, oppure quando la chiamata finisce senza risposta
+    // (così le frasi in coda non restano in attesa per sempre).
     this.answered = new Promise((resolve) => (this.onAnswered = resolve));
     const onError = (e) => { console.error(e); this.send({ type: "error", message: e.message }); };
     this.toLine = orderedQueue(onError); // le tue frasi, verso l'altra persona
@@ -199,6 +203,7 @@ class CallSession {
     }))();
     this.toLine(work, async (r) => {
       await this.answered;
+      if (this.ended) return;
       this.send({ type: "line", who, ...r });
       await this.speakOnLine(r.translation);
     });
@@ -206,6 +211,7 @@ class CallSession {
 
   /** Una tua frase (WAV dal telefono). */
   fromMe(wav) {
+    if (this.ended) return;
     const work = (async () => {
       const { text } = await transcribe(wav, { language: this.me.lang });
       if (isBlank(text)) return null;
@@ -214,6 +220,7 @@ class CallSession {
     })();
     this.toLine(work, async (r) => {
       await this.answered;
+      if (this.ended) return;
       this.history.push({ speaker: this.me.name, original: r.original });
       this.send({ type: "line", who: "me", ...r });
       await this.speakOnLine(r.translation);
@@ -222,6 +229,7 @@ class CallSession {
 
   /** Una frase dell'altra persona (PCM 8 kHz dalla linea). */
   fromLine(pcm) {
+    if (this.ended) return;
     const work = (async () => {
       const { text } = await transcribe(pcmToWav(pcm, 8000), { language: this.calleeLang });
       if (isBlank(text)) return null;
@@ -231,6 +239,7 @@ class CallSession {
       return { original: text, translation, audio };
     })();
     this.toMe(work, async (r) => {
+      if (this.ended) return;
       this.history.push({ speaker: "Interlocutore", original: r.original });
       this.send({ type: "line", who: "them", original: r.original, translation: r.translation });
       if (this.client.readyState === 1) this.client.send(r.audio); // audio MP3 da riprodurre
@@ -261,6 +270,7 @@ class CallSession {
   attachLine(ws, streamSid) {
     this.line = ws;
     this.streamSid = streamSid;
+    this.isAnswered = true;
     this.send({ type: "status", status: "in-progress" });
     this.onAnswered();
     const vad = lineVad((pcm) => this.fromLine(pcm));
@@ -285,8 +295,11 @@ class CallSession {
     if (this.ended) return;
     this.ended = true;
     sessions.delete(this.id);
-    if (this.callSid) {
-      twilio(`/Calls/${this.callSid}.json`, new URLSearchParams({ Status: "completed" })).catch(() => {});
+    this.onAnswered(); // sblocca le frasi in coda, che verranno scartate
+    if (this.callSid && reason !== "busy" && reason !== "no-answer" && reason !== "failed") {
+      // Twilio: "canceled" interrompe una chiamata che squilla, "completed" chiude quella in corso.
+      const Status = this.isAnswered ? "completed" : "canceled";
+      twilio(`/Calls/${this.callSid}.json`, new URLSearchParams({ Status })).catch(() => {});
     }
     try { this.line?.close(); } catch {}
     this.send({ type: "status", status: reason === "completed" ? "ended" : reason });
@@ -327,7 +340,7 @@ function onClient(ws) {
 
     const fail = (message) => { ws.send(JSON.stringify({ type: "error", message, fatal: true })); ws.close(); };
     if (!callsEnabled()) return fail("Le chiamate non sono configurate su questo server.");
-    if (!msg.code || !sameSecret(msg.code, ACCESS_CODE)) return fail("Codice di accesso errato.");
+    if (!msg.code || !checkAccessCode(msg.code)) return fail("Codice di accesso errato.");
     if (!/^\+[1-9]\d{6,14}$/.test(msg.to || "")) return fail("Numero non valido: usa il prefisso internazionale, es. +44…");
     const me = msg.me || {};
     if (!SUPPORTED.has(msg.calleeLang) || !SUPPORTED.has(me.lang)) return fail("Lingua non supportata.");

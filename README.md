@@ -27,7 +27,7 @@ Le frasi vengono elaborate in parallelo e riprodotte in ordine, così una frase 
 
 ```bash
 npm install
-cp .env.example .env    # poi inserisci le due chiavi
+cp .env.example .env    # poi inserisci le chiavi e un codice di accesso (APP_ACCESS_CODE)
 npm start
 ```
 
@@ -54,12 +54,13 @@ Ogni frase arriva dopo circa 1,5–3 secondi. Funziona meglio parlando con frasi
    - Con l'account di prova puoi chiamare solo numeri verificati, e chi risponde sente un messaggio di Twilio. Per l'uso reale serve un account a pagamento.
    - Se vuoi che chi risponde veda **il tuo numero di cellulare**, verificalo su Twilio ("Verified Caller IDs") e mettilo in `TWILIO_PHONE_NUMBER`.
 2. **Un server sempre acceso con HTTPS e WebSocket**, raggiungibile da Twilio, ad esempio Render, Railway o Fly.io. Vercel **non** va bene per le chiamate, perché non supporta WebSocket. Va bene solo per la modalità conversazione.
-3. Le variabili d'ambiente in `.env.example`: le chiavi Anthropic ed ElevenLabs, poi `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `PUBLIC_URL` (l'indirizzo https del server) e `CALL_ACCESS_CODE`.
+3. Le variabili d'ambiente in `.env.example`: le chiavi Anthropic ed ElevenLabs, poi `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `PUBLIC_URL` (l'indirizzo https del server) e `APP_ACCESS_CODE`.
 4. **La tua voce clonata.** Nella scheda **Persona A** imposta il tuo nome e la tua lingua, poi registra la voce. Se non la cloni, chi risponde sente una voce standard.
 
 ### Sicurezza e costi
 
-- Ogni chiamata costa: il minuto Twilio, più trascrizione, traduzione e sintesi vocale. Il **codice di accesso** (`CALL_ACCESS_CODE`) impedisce a chi trova l'indirizzo dell'app di chiamare a tue spese. Scegline uno lungo.
+- Ogni chiamata costa: il minuto Twilio, più trascrizione, traduzione e sintesi vocale. Il **codice di accesso** (`APP_ACCESS_CODE`) protegge tutte le funzioni a pagamento, non solo le chiamate. Chi trova l'indirizzo dell'app senza conoscere il codice non può usarla a tue spese. Scegline uno lungo e inseriscilo una volta nel campo in alto dell'app: viene ricordato sul telefono.
+- L'app può eliminare solo le voci che ha creato lei. Le altre voci del tuo account ElevenLabs non vengono mai toccate.
 - Le chiamate durano al massimo `CALL_MAX_MINUTES` minuti (predefinito: 30).
 - Il server accetta solo notifiche firmate da Twilio e flussi audio con un codice valido per quella chiamata.
 

@@ -1,5 +1,6 @@
 // Funzioni condivise: trascrizione, traduzione e sintesi vocale.
 import "dotenv/config";
+import crypto from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 
 export const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY;
@@ -46,14 +47,27 @@ export const normLang = (code) => {
   return ISO3_TO_1[c] || c;
 };
 
+// Se ElevenLabs rifiuta il codice lingua (lingua non supportata da quel modello),
+// si riprova senza: il modello la riconosce da solo.
+const isLanguageRejected = (e) => e.status === 400 || e.status === 422;
+
 /** Trascrive un file audio. Restituisce { text, language }. */
 export async function transcribe(buffer, { mimetype = "audio/wav", filename = "audio.wav", language } = {}) {
-  const form = new FormData();
-  form.append("model_id", STT_MODEL);
-  form.append("file", new Blob([buffer], { type: mimetype }), filename);
-  form.append("tag_audio_events", "false");
-  if (language) form.append("language_code", language);
-  const stt = await (await eleven("/v1/speech-to-text", { method: "POST", body: form })).json();
+  const run = async (lang) => {
+    const form = new FormData();
+    form.append("model_id", STT_MODEL);
+    form.append("file", new Blob([buffer], { type: mimetype }), filename);
+    form.append("tag_audio_events", "false");
+    if (lang) form.append("language_code", lang);
+    return (await eleven("/v1/speech-to-text", { method: "POST", body: form })).json();
+  };
+  let stt;
+  try {
+    stt = await run(language);
+  } catch (e) {
+    if (!language || !isLanguageRejected(e)) throw e;
+    stt = await run(undefined);
+  }
   return { text: (stt.text || "").trim(), language: normLang(stt.language_code) };
 }
 
@@ -64,19 +78,44 @@ export const isBlank = (text) => !text || text.replace(/[\p{P}\s]/gu, "").length
  * Sintesi vocale in streaming. format: "mp3_44100_128" per il browser,
  * "ulaw_8000" per la linea telefonica. Restituisce la Response (body in streaming).
  */
-export function synthesize({ text, voiceId, lang, format = "mp3_44100_128" }) {
-  const body = {
-    text,
-    model_id: TTS_MODEL,
-    voice_settings: { stability: 0.5, similarity_boost: 0.9, style: 0, use_speaker_boost: true },
+export async function synthesize({ text, voiceId, lang, format = "mp3_44100_128" }) {
+  const run = (withLang) => {
+    const body = {
+      text,
+      model_id: TTS_MODEL,
+      voice_settings: { stability: 0.5, similarity_boost: 0.9, style: 0, use_speaker_boost: true },
+    };
+    if (withLang) body.language_code = lang;
+    return eleven(
+      `/v1/text-to-speech/${encodeURIComponent(voiceId || FALLBACK_VOICE)}/stream?output_format=${format}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    );
   };
-  // I modelli v2.5 accettano il codice lingua per forzare la pronuncia corretta.
-  if (/v2_5|v3/.test(TTS_MODEL) && lang) body.language_code = lang;
-  return eleven(
-    `/v1/text-to-speech/${encodeURIComponent(voiceId || FALLBACK_VOICE)}/stream?output_format=${format}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-  );
+  // I modelli v2.5/v3 accettano il codice lingua per forzare la pronuncia corretta.
+  const withLang = Boolean(lang) && /v2_5|v3/.test(TTS_MODEL);
+  try {
+    return await run(withLang);
+  } catch (e) {
+    if (!withLang || !isLanguageRejected(e)) throw e;
+    return run(false);
+  }
 }
+
+// ---------- Codice di accesso ----------
+// Protegge tutte le funzioni a pagamento (trascrizione, traduzione, voce, chiamate).
+export const ACCESS_CODE = process.env.APP_ACCESS_CODE || process.env.CALL_ACCESS_CODE || "";
+export function checkAccessCode(given) {
+  if (!ACCESS_CODE) return true; // nessun codice configurato: uso locale
+  const a = crypto.createHash("sha256").update(String(given ?? "")).digest();
+  const b = crypto.createHash("sha256").update(ACCESS_CODE).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+if (!ACCESS_CODE) {
+  console.warn("⚠️  APP_ACCESS_CODE non impostato: chiunque raggiunga il server può usarlo. Impostalo prima di pubblicarlo online.");
+}
+
+// Prefisso dei nomi delle voci create dall'app: solo queste possono essere eliminate dall'app.
+export const VOICE_PREFIX = "traduttore-";
 
 // ---------- Traduzione (Claude) ----------
 
