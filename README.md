@@ -31,8 +31,25 @@ npm start
 
 Apri http://localhost:3000 in Chrome, Edge o Safari.
 
-> Per usarlo da telefono serve HTTPS, perché il browser dà accesso al microfono solo su connessioni sicure (o su localhost).
-> Ad esempio: `npx localtunnel --port 3000`, oppure pubblica l'app su un hosting con HTTPS.
+## Su iPhone
+
+Su iPhone Safari dà accesso al microfono solo se l'app è aperta da un indirizzo **https://**. Hai due strade.
+
+**1. Pubblicarla online (consigliato).** L'app è pronta per Vercel o per un qualsiasi hosting Node con HTTPS (Render, Railway, Fly.io…).
+Su Vercel: importa il repository, imposta le variabili `ANTHROPIC_API_KEY` ed `ELEVENLABS_API_KEY` e pubblica.
+Il server non tiene stato in memoria, quindi funziona anche su hosting serverless.
+
+**2. Provarla dal PC con un tunnel HTTPS.** Avvia `npm start`, poi esegui ad esempio
+`cloudflared tunnel --url http://localhost:3000` e apri sull'iPhone l'indirizzo `https://…trycloudflare.com` che compare.
+
+Poi, sull'iPhone:
+
+1. Apri l'indirizzo in **Safari** e consenti l'accesso al microfono.
+2. *(Facoltativo)* Tocca **Condividi → Aggiungi alla schermata Home**: l'app si apre a schermo intero, con la sua icona.
+3. Il primo tocco su un pulsante sblocca l'audio: è una regola di iOS, e l'app lo gestisce da sola.
+4. In modalità mani libere lo schermo resta acceso. Se blocchi l'iPhone o passi a un'altra app, iOS spegne il microfono: torna sull'app e premi di nuovo *Avvia*.
+5. Con gli **AirPods** o altri auricolari spunta "Usiamo gli auricolari": la traduzione diventa davvero simultanea e la qualità migliora.
+6. Per clonare la voce puoi anche caricare un memo vocale (m4a) dall'app File.
 
 ## Uso
 
@@ -65,4 +82,5 @@ server.js          API: /api/turn (trascrivi, traduci, prepara l'audio), /api/vo
 public/index.html  Interfaccia
 public/app.js      Microfono, rilevamento della voce, coda di riproduzione
 public/style.css   Stile (chiaro/scuro, adatto al telefono)
+public/manifest.webmanifest, icone   Installazione sulla schermata Home
 ```

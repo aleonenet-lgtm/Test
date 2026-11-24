@@ -40,13 +40,42 @@ const recentOutputs = []; // { text, at } per scartare l'eco degli altoparlanti
 let audioCtx, sampleRate, micReady;
 const chunkListeners = new Set();
 
+// iPhone/Safari: l'audio si sblocca solo dentro un gesto dell'utente (tocco), e in modo
+// sincrono, prima di qualsiasi await. Ogni pulsante chiama primeAudio() per prima cosa.
+const player = new Audio();
+player.setAttribute("playsinline", "");
+player.preload = "auto";
+let playerUnlocked = false;
+// 0,1 s di silenzio in WAV, per "attivare" il lettore durante il primo tocco.
+const SILENT_WAV = "data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==";
+
+function primeAudio() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new Ctx();
+  }
+  if (audioCtx.state !== "running") audioCtx.resume().catch(() => {});
+  if (!playerUnlocked && !playing) {
+    playerUnlocked = true;
+    player.src = SILENT_WAV;
+    player.play().catch(() => { playerUnlocked = false; });
+  }
+}
+
 async function ensureMic() {
-  if (micReady) return micReady;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(
+      location.protocol === "https:" || location.hostname === "localhost"
+        ? "questo browser non supporta l'accesso al microfono"
+        : "su iPhone il microfono funziona solo con un indirizzo https://",
+    );
+  }
+  if (micReady) { await micReady; if (audioCtx.state !== "running") await audioCtx.resume(); return; }
   micReady = (async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
     });
-    audioCtx = new AudioContext();
+    if (!audioCtx) primeAudio();
     sampleRate = audioCtx.sampleRate;
     const workletSrc = `
       class Tap extends AudioWorkletProcessor {
@@ -73,8 +102,24 @@ async function ensureMic() {
     node.connect(mute).connect(audioCtx.destination);
   })();
   try { await micReady; } catch (e) { micReady = null; throw e; }
-  if (audioCtx.state === "suspended") await audioCtx.resume();
+  if (audioCtx.state !== "running") await audioCtx.resume();
 }
+
+// Quando si torna all'app (es. dopo una notifica o una chiamata) iOS sospende l'audio.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && audioCtx && audioCtx.state !== "running") {
+    audioCtx.resume().catch(() => setStatus("Tocca lo schermo per riattivare l'audio.", true));
+  }
+  if (document.visibilityState === "visible" && vad.on) keepAwake();
+});
+document.addEventListener("touchend", () => audioCtx && audioCtx.state !== "running" && audioCtx.resume(), { passive: true });
+
+// Tiene lo schermo acceso in modalità mani libere: se il telefono si blocca, il microfono si ferma.
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+}
+function releaseAwake() { wakeLock?.release().catch(() => {}); wakeLock = null; }
 
 const rms = (a) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / a.length); };
 
@@ -152,6 +197,7 @@ async function recordSample(id, card) {
   if (!checkConsent(card)) return;
   const btn = $(".rec-sample", card);
   if (btn._stop) return btn._stop();
+  primeAudio();
   try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
   const chunks = [];
   const fn = (c) => chunks.push(c);
@@ -243,14 +289,27 @@ function sendSegment(chunks, forcedSpeaker) {
   });
 }
 
+// Un unico elemento audio, già sbloccato dal primo tocco: su iPhone un nuovo
+// elemento creato fuori da un gesto dell'utente non potrebbe suonare.
 function play(url) {
   return new Promise((resolve) => {
-    const audio = new Audio(url);
     playing = true;
-    const done = () => { playing = false; suppressUntil = Date.now() + 400; resolve(); };
-    audio.onended = done;
-    audio.onerror = () => { setStatus("Riproduzione audio non riuscita.", true); done(); };
-    audio.play().catch(done);
+    let finished = false;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      player.onended = player.onerror = null;
+      playing = false;
+      suppressUntil = Date.now() + 400;
+      resolve();
+    };
+    player.onended = done;
+    player.onerror = () => { setStatus("Riproduzione audio non riuscita.", true); done(); };
+    player.src = url;
+    player.play().catch((e) => {
+      setStatus(e.name === "NotAllowedError" ? "Tocca lo schermo per abilitare l'audio, poi premi Riascolta." : "Riproduzione audio non riuscita.", true);
+      done();
+    });
   });
 }
 
@@ -272,6 +331,7 @@ function isEcho(text) {
 // ---------------- Push-to-talk ----------------
 const ptt = { chunks: null, fn: null };
 async function startPTT(id, btn) {
+  primeAudio();
   try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
   ptt.chunks = [];
   ptt.fn = (c) => ptt.chunks.push(c);
@@ -300,10 +360,13 @@ $("#auto").onclick = async () => {
     btn.classList.remove("on");
     btn.textContent = "▶︎ Avvia modalità mani libere";
     $("#level").style.width = "0";
+    releaseAwake();
     return setStatus("Ascolto interrotto.");
   }
+  primeAudio();
   try { await ensureMic(); } catch (e) { return setStatus("Microfono non disponibile: " + e.message, true); }
   vad.on = true;
+  keepAwake();
   btn.classList.add("on");
   btn.textContent = "■ Ferma ascolto";
   setStatus(`In ascolto: parlate a turno in ${LANGS[speakers.a.lang]} o ${LANGS[speakers.b.lang]}.`);
@@ -354,7 +417,7 @@ function fillBubble(el, d) {
   $(".tr", el).textContent = d.translation;
   const again = document.createElement("button");
   again.textContent = "🔊 Riascolta";
-  again.onclick = () => { playChain = playChain.then(() => play(d.audioUrl)); };
+  again.onclick = () => { primeAudio(); playChain = playChain.then(() => play(d.audioUrl)); };
   el.append(again);
 }
 

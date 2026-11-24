@@ -45,7 +45,7 @@ async function eleven(pathname, init = {}) {
 }
 
 function audioBlob(file) {
-  return new Blob([file.buffer], { type: file.mimetype || "audio/webm" });
+  return new Blob([file.buffer], { type: file.mimetype || "audio/wav" });
 }
 
 // ISO 639-3 (restituito da Scribe) -> ISO 639-1 usato dall'interfaccia.
@@ -75,7 +75,7 @@ app.post("/api/voices", upload.array("samples", 5), async (req, res) => {
     form.append("name", `traduttore-${(req.body.name || "voce").slice(0, 40)}-${Date.now()}`);
     form.append("description", "Voce temporanea per traduzione simultanea");
     form.append("remove_background_noise", "true");
-    req.files.forEach((f, i) => form.append("files", audioBlob(f), `campione-${i}.webm`));
+    req.files.forEach((f, i) => form.append("files", audioBlob(f), f.originalname || `campione-${i}.wav`));
     const r = await eleven("/v1/voices/add", { method: "POST", body: form });
     const data = await r.json();
     res.json({ voiceId: data.voice_id });
@@ -147,19 +147,43 @@ async function translate({ text, from, to, history }) {
 
 // ---------- Sintesi vocale (cache di breve durata per lo streaming via GET) ----------
 
-const ttsJobs = new Map(); // id -> { text, voiceId, lang, expires }
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, job] of ttsJobs) if (job.expires < now) ttsJobs.delete(id);
-}, 60_000).unref();
+// Il link audio contiene un token firmato (testo, voce, lingua, scadenza): nessuno stato
+// sul server, quindi funziona anche su hosting serverless con più istanze (es. Vercel).
+const TOKEN_KEY = crypto
+  .createHmac("sha256", process.env.TTS_SECRET || ELEVEN_KEY || "dev")
+  .update("tts-token")
+  .digest();
+const sign = (data) => crypto.createHmac("sha256", TOKEN_KEY).update(data).digest("base64url");
 
-app.get("/api/tts/:id", async (req, res) => {
-  const job = ttsJobs.get(req.params.id);
+function makeTtsToken(job) {
+  const data = Buffer.from(JSON.stringify(job)).toString("base64url");
+  return `${data}.${sign(data)}`;
+}
+function readTtsToken(token) {
+  const [data, mac] = String(token).split(".");
+  if (!data || !mac) return null;
+  const expected = Buffer.from(sign(data));
+  const given = Buffer.from(mac);
+  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
+  const job = JSON.parse(Buffer.from(data, "base64url").toString());
+  return job.expires > Date.now() ? job : null;
+}
+
+// Cache locale dell'audio già generato, per "Riascolta" senza una nuova sintesi.
+const audioCache = new Map();
+function cacheAudio(key, buf) {
+  audioCache.set(key, buf);
+  if (audioCache.size > 50) audioCache.delete(audioCache.keys().next().value);
+}
+
+app.get("/api/tts/:token", async (req, res) => {
+  const job = readTtsToken(req.params.token);
   if (!job) return res.status(404).end();
   res.setHeader("Content-Type", "audio/mpeg");
   res.setHeader("Cache-Control", "no-store");
   // "Riascolta": l'audio già generato viene servito dalla cache senza una nuova sintesi.
-  if (job.audio) return res.end(job.audio);
+  const cached = audioCache.get(req.params.token);
+  if (cached) return res.end(cached);
   try {
     const body = {
       text: job.text,
@@ -181,7 +205,7 @@ app.get("/api/tts/:id", async (req, res) => {
       parts.push(buf);
       res.write(buf);
     }
-    job.audio = Buffer.concat(parts);
+    cacheAudio(req.params.token, Buffer.concat(parts));
     res.end();
   } catch (e) {
     console.error(e);
@@ -203,7 +227,7 @@ app.post("/api/turn", upload.single("audio"), async (req, res) => {
     // 1) Trascrizione
     const form = new FormData();
     form.append("model_id", STT_MODEL);
-    form.append("file", audioBlob(req.file), "segmento.webm");
+    form.append("file", audioBlob(req.file), req.file.originalname || "segmento.wav");
     form.append("tag_audio_events", "false");
     if (forcedSpeaker) form.append("language_code", forcedSpeaker === "a" ? a.lang : b.lang);
     const stt = await (await eleven("/v1/speech-to-text", { method: "POST", body: form })).json();
@@ -226,12 +250,11 @@ app.post("/api/turn", upload.single("audio"), async (req, res) => {
     if (!translation) return res.json({ empty: true });
 
     // 4) Audio con la voce di chi ha parlato
-    const id = crypto.randomUUID();
-    ttsJobs.set(id, {
+    const token = makeTtsToken({
       text: translation,
       voiceId: src.voiceId || FALLBACK_VOICE,
       lang: dst.lang,
-      expires: Date.now() + 5 * 60_000,
+      expires: Date.now() + 30 * 60_000,
     });
 
     res.json({
@@ -241,7 +264,7 @@ app.post("/api/turn", upload.single("audio"), async (req, res) => {
       translation,
       from: src.lang,
       to: dst.lang,
-      audioUrl: `/api/tts/${id}`,
+      audioUrl: `/api/tts/${token}`,
     });
   } catch (e) {
     console.error(e);
@@ -254,4 +277,8 @@ app.get("/api/health", (_req, res) =>
   res.json({ ok: true, elevenlabs: Boolean(ELEVEN_KEY), claudeModel: CLAUDE_MODEL, ttsModel: TTS_MODEL }),
 );
 
-app.listen(PORT, () => console.log(`Traduttore attivo su http://localhost:${PORT}`));
+// Su Vercel l'app viene esportata e avviata dalla piattaforma; in locale ascolta sulla porta.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => console.log(`Traduttore attivo su http://localhost:${PORT}`));
+}
+export default app;

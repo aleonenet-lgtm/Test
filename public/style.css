@@ -6,8 +6,13 @@
   :root { --bg: #12141b; --card: #1c1f2a; --text: #eceef5; --muted: #9aa0b4; --border: #2c3040; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+body { margin: 0; font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text);
+  -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 header { padding: 20px 16px 4px; max-width: 1000px; margin: auto; }
+/* Pulsanti: niente menu "copia/seleziona" di iOS durante la pressione prolungata. */
+button, .file-btn { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
+input, select { font-size: 16px; } /* sotto i 16px Safari ingrandisce la pagina al tocco */
 h1 { margin: 0; font-size: 1.6rem; }
 .sub { margin: 4px 0 0; color: var(--muted); }
 main { max-width: 1000px; margin: auto; padding: 16px; }
@@ -25,7 +30,7 @@ select { margin-left: 6px; }
 .consent { font-size: .9rem; color: var(--muted); }
 .voice-status { margin: 10px 0 4px; font-weight: 600; }
 .read-text { font-size: .9rem; color: var(--muted); font-style: italic; }
-.ptt { width: 100%; padding: 16px; margin-top: 8px; font-weight: 600; user-select: none; touch-action: none; }
+.ptt { width: 100%; padding: 22px 16px; margin-top: 8px; font-weight: 600; font-size: 1.05rem; touch-action: none; }
 .speaker[data-id="a"] .ptt.active { background: var(--a); color: #fff; }
 .speaker[data-id="b"] .ptt.active { background: var(--b); color: #fff; }
 button.recording { background: var(--danger); color: #fff; }
@@ -39,6 +44,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .small { font-size: .9rem; color: var(--muted); }
 #log { display: flex; flex-direction: column; gap: 10px; }
 .msg { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; max-width: 80%; }
+@media (max-width: 720px) {
+  .msg { max-width: 92%; }
+  .primary { width: 100%; padding: 16px; }
+  .speaker { padding: 14px; }
+}
 .msg.a { align-self: flex-start; border-left: 4px solid var(--a); }
 .msg.b { align-self: flex-end; border-right: 4px solid var(--b); }
 .msg .who { font-size: .8rem; color: var(--muted); }
